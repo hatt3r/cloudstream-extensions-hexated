@@ -2,6 +2,8 @@ package com.hexated
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.extractors.JWPlayer
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -11,7 +13,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class OtakudesuProvider : MainAPI() {
-    override var mainUrl = "https://otakudesu.lol"
+    override var mainUrl = "https://otakudesu.wiki"
     override var name = "Otakudesu"
     override val hasMainPage = true
     override var lang = "id"
@@ -94,8 +96,8 @@ class OtakudesuProvider : MainAPI() {
             ?.replace(":", "")?.trim().toString()
         val poster = document.selectFirst("div.fotoanime > img")?.attr("src")
         val tags = document.select("div.infozingle > p:nth-child(11) > span > a").map { it.text() }
-        val type = document.selectFirst("div.infozingle > p:nth-child(5) > span")?.ownText()
-            ?.replace(":", "")?.trim() ?: "tv"
+        val type = getType(document.selectFirst("div.infozingle > p:nth-child(5) > span")?.ownText()
+            ?.replace(":", "")?.trim() ?: "tv")
 
         val year = Regex("\\d, (\\d*)").find(
             document.select("div.infozingle > p:nth-child(9) > span").text()
@@ -112,7 +114,7 @@ class OtakudesuProvider : MainAPI() {
             val episode = Regex("Episode\\s?(\\d+)").find(name)?.groupValues?.getOrNull(0)
                 ?: it.selectFirst("a")?.text()
             val link = fixUrl(it.selectFirst("a")!!.attr("href"))
-            Episode(link, name, episode = episode?.toIntOrNull())
+            Episode(link, episode = episode?.toIntOrNull())
         }.reversed()
 
         val recommendations =
@@ -125,15 +127,20 @@ class OtakudesuProvider : MainAPI() {
                 }
             }
 
-        return newAnimeLoadResponse(title, url, getType(type)) {
+        val tracker = APIHolder.getTracker(listOf(title),TrackerType.getTypes(type),year,true)
+
+        return newAnimeLoadResponse(title, url, type) {
             engName = title
-            posterUrl = poster
+            posterUrl = tracker?.image ?: poster
+            backgroundPosterUrl = tracker?.cover
             this.year = year
             addEpisodes(DubStatus.Subbed, episodes)
             showStatus = status
             plot = description
             this.tags = tags
             this.recommendations = recommendations
+            addMalId(tracker?.malId)
+            addAniListId(tracker?.aniId?.toIntOrNull())
         }
     }
 
@@ -274,4 +281,9 @@ class Moedesu : JWPlayer() {
 class DesuBeta : JWPlayer() {
     override val name = "DesuBeta"
     override val mainUrl = "https://desustream.me/beta/"
+}
+
+class Desudesuhd : JWPlayer() {
+    override val name = "Desudesuhd"
+    override val mainUrl = "https://desustream.me/desudesuhd/"
 }

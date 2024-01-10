@@ -3,47 +3,51 @@ package com.hexated
 import android.util.Base64
 import com.hexated.DumpUtils.queryApi
 import com.hexated.SoraStream.Companion.anilistAPI
-import com.hexated.SoraStream.Companion.base64DecodeAPI
-import com.hexated.SoraStream.Companion.consumetHelper
 import com.hexated.SoraStream.Companion.crunchyrollAPI
 import com.hexated.SoraStream.Companion.filmxyAPI
-import com.hexated.SoraStream.Companion.fmoviesAPI
 import com.hexated.SoraStream.Companion.gdbot
+import com.hexated.SoraStream.Companion.hdmovies4uAPI
 import com.hexated.SoraStream.Companion.malsyncAPI
-import com.hexated.SoraStream.Companion.smashyStreamAPI
 import com.hexated.SoraStream.Companion.tvMoviesAPI
-import com.hexated.SoraStream.Companion.watchOnlineAPI
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.APIHolder.getCaptchaToken
 import com.lagradost.cloudstream3.APIHolder.unixTimeMS
+import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.nicehttp.NiceResponse
 import com.lagradost.nicehttp.RequestBodyTypes
+import com.lagradost.nicehttp.Requests.Companion.await
 import com.lagradost.nicehttp.requestCreator
 import kotlinx.coroutines.delay
 import okhttp3.FormBody
-import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.jsoup.nodes.Document
 import java.math.BigInteger
 import java.net.*
+import java.nio.charset.StandardCharsets
 import java.security.*
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.collections.ArrayList
 import kotlin.math.min
 
-val bflixChipperKey = base64DecodeAPI("Yjc=ejM=TzA=YTk=WHE=WnU=bXU=RFo=")
-const val bflixKey = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+var filmxyCookies: Map<String, String>? = null
+var sfServer: String? = null
+
 val encodedIndex = arrayOf(
     "GamMovies",
     "JSMovies",
@@ -91,51 +95,6 @@ val mimeType = arrayOf(
     "video/x-msvideo"
 )
 
-fun String.filterIframe(
-    seasonNum: Int? = null,
-    lastSeason: Int? = null,
-    year: Int?,
-    title: String?
-): Boolean {
-    val slug = title.createSlug()
-    val dotSlug = slug?.replace("-", ".")
-    val spaceSlug = slug?.replace("-", " ")
-    return if (seasonNum != null) {
-        if (lastSeason == 1) {
-            this.contains(Regex("(?i)(S0?$seasonNum)|(Season\\s0?$seasonNum)|(\\d{3,4}p)")) && !this.contains(
-                "Download",
-                true
-            )
-        } else {
-            this.contains(Regex("(?i)(S0?$seasonNum)|(Season\\s0?$seasonNum)")) && !this.contains(
-                "Download",
-                true
-            )
-        }
-    } else {
-        this.contains(Regex("(?i)($year)|($dotSlug)|($spaceSlug)")) && !this.contains(
-            "Download",
-            true
-        )
-    }
-}
-
-fun String.filterMedia(title: String?, yearNum: Int?, seasonNum: Int?): Boolean {
-    val fixTitle = title.createSlug()?.replace("-", " ")
-    return if (seasonNum != null) {
-        when {
-            seasonNum > 1 -> this.contains(Regex("(?i)(Season\\s0?1-0?$seasonNum)|(S0?1-S?0?$seasonNum)")) && this.contains(
-                Regex("(?i)($fixTitle)|($title)")
-            )
-            else -> this.contains(Regex("(?i)(Season\\s0?1)|(S0?1)")) && this.contains(
-                Regex("(?i)($fixTitle)|($title)")
-            ) && this.contains("$yearNum")
-        }
-    } else {
-        this.contains(Regex("(?i)($fixTitle)|($title)")) && this.contains("$yearNum")
-    }
-}
-
 fun Document.getMirrorLink(): String? {
     return this.select("div.mb-4 a").randomOrNull()
         ?.attr("href")
@@ -170,7 +129,7 @@ suspend fun extractInstantUHD(url: String): String? {
         .build()
     return app.post(
         "$host/api", requestBody = body, headers = mapOf(
-            "x-token" to "${url.toUri().host}"
+            "x-token" to URI(url).host
         ), referer = "$host/"
     ).parsedSafe<Map<String, String>>()?.get("url")
 }
@@ -369,10 +328,17 @@ suspend fun getDrivebotLink(url: String?): String? {
         ?.data()?.substringAfter("window.open('")?.substringBefore("')")
 }
 
-suspend fun extractOiya(url: String, quality: String): String? {
-    val doc = app.get(url).document
-    return doc.selectFirst("div.wp-block-button a:matches((?i)$quality)")?.attr("href")
-        ?: doc.selectFirst("div.wp-block-button a")?.attr("href")
+suspend fun extractOiya(url: String): String? {
+    return app.get(url).document.selectFirst("div.wp-block-button a")?.attr("href")
+}
+
+fun deobfstr(hash: String, index: String): String {
+    var result = ""
+    for (i in hash.indices step 2) {
+        val j = hash.substring(i, i + 2)
+        result += (j.toInt(16) xor index[(i / 2) % index.length].code).toChar()
+    }
+    return result
 }
 
 suspend fun extractCovyn(url: String?): Pair<String?, String?>? {
@@ -430,209 +396,49 @@ suspend fun getDirectGdrive(url: String): String {
 
 }
 
-suspend fun invokeVizcloud(
-    serverid: String,
-    url: String,
-    subtitleCallback: (SubtitleFile) -> Unit,
-    callback: (ExtractorLink) -> Unit,
-) {
-    val id = Regex("(?:/embed[-/]|/e/)([^?/]*)").find(url)?.groupValues?.getOrNull(1)
-    app.get("$consumetHelper?query=${id ?: return}&action=vizcloud")
-        .parsedSafe<VizcloudResponses>()?.result?.sources?.map {
-            M3u8Helper.generateM3u8(
-                "Vizcloud",
-                it.file ?: return@map,
-                "${getBaseUrl(url)}/"
-            ).forEach(callback)
-        }
-
-    val sub = app.get("${fmoviesAPI}/ajax/episode/subtitles/$serverid")
-    tryParseJson<List<FmoviesSubtitles>>(sub.text)?.map {
-        subtitleCallback.invoke(
-            SubtitleFile(
-                it.label ?: "",
-                it.file ?: return@map
-            )
-        )
-    }
-}
-
 suspend fun invokeSmashyFfix(
     name: String,
     url: String,
     ref: String,
+    subtitleCallback: (SubtitleFile) -> Unit,
     callback: (ExtractorLink) -> Unit,
 ) {
-    val res = app.get(url, referer = ref).text
-    val source = Regex("['\"]?file['\"]?:\\s*\"([^\"]+)").find(res)?.groupValues?.get(1) ?: return
-
-    source.split(",").map { links ->
-        val quality = Regex("\\[(\\d+)]").find(links)?.groupValues?.getOrNull(1)?.trim()
-        val link = links.removePrefix("[$quality]").trim()
-        callback.invoke(
-            ExtractorLink(
-                "Smashy [$name]",
-                "Smashy [$name]",
-                decode(link).replace("\\/", "/"),
-                smashyStreamAPI,
-                quality?.toIntOrNull() ?: return@map,
-                isM3u8 = link.contains(".m3u8"),
-            )
-        )
-    }
-
-}
-
-suspend fun invokeSmashyGtop(
-    name: String,
-    url: String,
-    callback: (ExtractorLink) -> Unit
-) {
-    val doc = app.get(url).document
-    val script = doc.selectFirst("script:containsData(var secret)")?.data() ?: return
-    val secret =
-        script.substringAfter("secret = \"").substringBefore("\";").let { base64Decode(it) }
-    val key = script.substringAfter("token = \"").substringBefore("\";")
-    val source = app.get(
-        "$secret$key",
-        headers = mapOf(
-            "X-Requested-With" to "XMLHttpRequest"
-        )
-    ).parsedSafe<Smashy1Source>() ?: return
-
-    val videoUrl = base64Decode(source.file ?: return)
-    if (videoUrl.contains("/bug")) return
-    val quality =
-        Regex("(\\d{3,4})[Pp]").find(videoUrl)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?: Qualities.P720.value
-    callback.invoke(
-        ExtractorLink(
-            "Smashy [$name]",
-            "Smashy [$name]",
-            videoUrl,
-            "",
-            quality,
-            videoUrl.contains(".m3u8")
-        )
-    )
-}
-
-suspend fun invokeSmashyDude(
-    name: String,
-    url: String,
-    callback: (ExtractorLink) -> Unit
-) {
-    val script =
-        app.get(url).document.selectFirst("script:containsData(player =)")?.data() ?: return
-
-    val source = Regex("file:\\s*(\\[.*]),").find(script)?.groupValues?.get(1) ?: return
-
-    tryParseJson<ArrayList<DudetvSources>>(source)?.filter { it.title == "English" }?.map {
+    val json = app.get(url, referer = ref, headers = mapOf("X-Requested-With" to "XMLHttpRequest"))
+        .parsedSafe<SmashySources>()
+    json?.sourceUrls?.map {
         M3u8Helper.generateM3u8(
-            "Smashy [Player 2]",
-            it.file ?: return@map,
+            "Smashy [$name]",
+            it,
             ""
         ).forEach(callback)
     }
 
-}
-
-suspend fun invokeSmashyRip(
-    name: String,
-    url: String,
-    subtitleCallback: (SubtitleFile) -> Unit,
-    callback: (ExtractorLink) -> Unit,
-) {
-    val script =
-        app.get(url).document.selectFirst("script:containsData(player =)")?.data() ?: return
-
-    val source = Regex("file:\\s*\"([^\"]+)").find(script)?.groupValues?.get(1)
-    val subtitle = Regex("subtitle:\\s*\"([^\"]+)").find(script)?.groupValues?.get(1)
-
-    source?.split(",")?.map { links ->
-        val quality = Regex("\\[(\\d+)]").find(links)?.groupValues?.getOrNull(1)?.trim()
-        val link = links.removePrefix("[$quality]").substringAfter("dev/").trim()
-        if (link.isEmpty()) return@map
-        callback.invoke(
-            ExtractorLink(
-                "Smashy [$name]",
-                "Smashy [$name]",
-                link,
-                "",
-                quality?.toIntOrNull() ?: return@map,
-                isM3u8 = true,
-            )
-        )
-    }
-
-    subtitle?.replace("<br>", "")?.split(",")?.map { sub ->
-        val lang = Regex("\\[(.*?)]").find(sub)?.groupValues?.getOrNull(1)?.trim()
-        val link = sub.removePrefix("[$lang]")
+    json?.subtitleUrls?.split(",")?.map { sub ->
+        val lang = "\\[(.*)]".toRegex().find(sub)?.groupValues?.get(1)
+        val subUrl = sub.replace("[$lang]", "").trim()
         subtitleCallback.invoke(
             SubtitleFile(
-                lang.orEmpty().ifEmpty { return@map },
-                link
+                lang ?: return@map,
+                subUrl
             )
         )
     }
 
 }
 
-suspend fun invokeSmashyIm(
-    name: String,
+suspend fun invokeSmashyD(
     url: String,
-    subtitleCallback: (SubtitleFile) -> Unit,
+    ref: String,
     callback: (ExtractorLink) -> Unit,
 ) {
-    val script =
-        app.get(url).document.selectFirst("script:containsData(player =)")?.data() ?: return
-
-    val sources =
-        Regex("['\"]?file['\"]?:\\s*\"([^\"]+)").find(script)?.groupValues?.get(1) ?: return
-    val subtitles =
-        Regex("['\"]?subtitle['\"]?:\\s*\"([^\"]+)").find(script)?.groupValues?.get(1) ?: return
-
-    M3u8Helper.generateM3u8(
-        "Smashy [$name]",
-        sources,
-        ""
-    ).forEach(callback)
-
-    subtitles.split(",").map { sub ->
-        val lang = Regex("\\[(.*?)]").find(sub)?.groupValues?.getOrNull(1)?.trim()
-        val trimmedSubLink = sub.removePrefix("[$lang]").trim().substringAfter("?url=")
-        subtitleCallback.invoke(
-            SubtitleFile(
-                lang.takeIf { !it.isNullOrEmpty() } ?: return@map,
-                trimmedSubLink
-            )
-        )
-    }
-
-}
-
-suspend fun invokeSmashyRw(
-    name: String,
-    url: String,
-    subtitleCallback: (SubtitleFile) -> Unit,
-    callback: (ExtractorLink) -> Unit,
-) {
-    val res = app.get(url).document
-    val video = res.selectFirst("media-player")?.attr("src")
-
-    M3u8Helper.generateM3u8(
-        "Smashy [$name]",
-        video ?: return,
-        ""
-    ).forEach(callback)
-
-    res.select("track").map { track ->
-        subtitleCallback.invoke(
-            SubtitleFile(
-                track.attr("label"),
-                track.attr("src"),
-            )
-        )
+    val json = app.get(url, referer = ref, headers = mapOf("X-Requested-With" to "XMLHttpRequest"))
+        .parsedSafe<SmashyDSources>()
+    json?.sourceUrls?.apmap {
+        M3u8Helper.generateM3u8(
+            "Smashy [Player D ${it.title}]",
+            it.file ?: return@apmap,
+            ""
+        ).forEach(callback)
     }
 
 }
@@ -660,6 +466,7 @@ suspend fun getDumpIdAndType(title: String?, year: Int?, season: Int?): Pair<Str
                         true
                     ) && it.releaseTime == "$year" && it.domainType == 0
                 }
+
                 1 -> {
                     it.name?.contains(
                         "$title",
@@ -669,6 +476,7 @@ suspend fun getDumpIdAndType(title: String?, year: Int?, season: Int?): Pair<Str
                         true
                     )) && it.domainType == 1
                 }
+
                 else -> {
                     it.name?.contains(Regex("(?i)$title\\s?($season|${season.toRomanNumeral()}|Season\\s$season)")) == true && it.releaseTime == "$year" && it.domainType == 1
                 }
@@ -693,6 +501,53 @@ suspend fun fetchDumpEpisodes(id: String, type: String, episode: Int?): EpisodeV
     )?.episodeVo?.find {
         it.seriesNo == (episode ?: 0)
     }
+}
+
+suspend fun invokeDrivetot(
+    url: String,
+    tags: String? = null,
+    size: String? = null,
+    subtitleCallback: (SubtitleFile) -> Unit,
+    callback: (ExtractorLink) -> Unit,
+) {
+    val res = app.get(url)
+    val data = res.document.select("form input").associate { it.attr("name") to it.attr("value") }
+    app.post(res.url, data = data, cookies = res.cookies).document.select("div.card-body a")
+        .apmap { ele ->
+            val href = base64Decode(ele.attr("href").substringAfterLast("/")).let {
+                if (it.contains("hubcloud.lol")) it.replace("hubcloud.lol", "hubcloud.in") else it
+            }
+            loadExtractor(href, "$hdmovies4uAPI/", subtitleCallback) { link ->
+                callback.invoke(
+                    ExtractorLink(
+                        link.source,
+                        "${link.name} $tags [$size]",
+                        link.url,
+                        link.referer,
+                        link.quality,
+                        link.type,
+                        link.headers,
+                        link.extractorData
+                    )
+                )
+            }
+        }
+}
+
+suspend fun bypassBqrecipes(url: String): String? {
+    var res = app.get(url)
+    var location = res.text.substringAfter(".replace('").substringBefore("');")
+    var cookies = res.cookies
+    res = app.get(location, cookies = cookies)
+    cookies = cookies + res.cookies
+    val document = res.document
+    location = document.select("form#recaptcha").attr("action")
+    val data =
+        document.select("form#recaptcha input").associate { it.attr("name") to it.attr("value") }
+    res = app.post(location, data = data, cookies = cookies)
+    location = res.document.selectFirst("a#messagedown")?.attr("href") ?: return null
+    cookies = (cookies + res.cookies).minus("var")
+    return app.get(location, cookies = cookies, allowRedirects = false).headers["location"]
 }
 
 suspend fun bypassOuo(url: String?): String? {
@@ -722,32 +577,6 @@ suspend fun bypassOuo(url: String?): String? {
     return res.headers["location"]
 }
 
-suspend fun fetchingKaizoku(
-    domain: String,
-    postId: String,
-    data: List<String>,
-    ref: String
-): NiceResponse {
-    return app.post(
-        "$domain/wp-admin/admin-ajax.php",
-        data = mapOf(
-            "action" to "DDL",
-            "post_id" to postId,
-            "div_id" to data.first(),
-            "tab_id" to data[1],
-            "num" to data[2],
-            "folder" to data.last()
-        ),
-        headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
-        referer = ref
-    )
-}
-
-fun String.splitData(): List<String> {
-    return this.substringAfterLast("DDL(").substringBefore(")").split(",")
-        .map { it.replace("'", "").trim() }
-}
-
 suspend fun bypassFdAds(url: String?): String? {
     val directUrl =
         app.get(url ?: return null, verify = false).document.select("a#link").attr("href")
@@ -767,122 +596,35 @@ suspend fun bypassFdAds(url: String?): String? {
 }
 
 suspend fun bypassHrefli(url: String): String? {
-    val postUrl = url.substringBefore("?id=").substringAfter("/?")
-    val res = app.post(
-        postUrl, data = mapOf(
-            "_wp_http" to url.substringAfter("?id=")
-        )
-    ).document
+    fun Document.getFormUrl(): String {
+        return this.select("form#landing").attr("action")
+    }
 
-    val link = res.select("form#landing").attr("action")
-    val wpHttp = res.select("input[name=_wp_http2]").attr("value")
-    val token = res.select("input[name=token]").attr("value")
+    fun Document.getFormData(): Map<String, String> {
+        return this.select("form#landing input").associate { it.attr("name") to it.attr("value") }
+    }
 
-    val blogRes = app.post(
-        link, data = mapOf(
-            "_wp_http2" to wpHttp,
-            "token" to token
-        )
-    ).text
+    val host = getBaseUrl(url)
+    var res = app.get(url).document
+    var formUrl = res.getFormUrl()
+    var formData = res.getFormData()
 
-    val skToken = blogRes.substringAfter("?go=").substringBefore("\"")
+    res = app.post(formUrl, data = formData).document
+    formUrl = res.getFormUrl()
+    formData = res.getFormData()
+
+    res = app.post(formUrl, data = formData).document
+    val skToken = res.selectFirst("script:containsData(?go=)")?.data()?.substringAfter("?go=")
+        ?.substringBefore("\"") ?: return null
     val driveUrl = app.get(
-        "$postUrl?go=$skToken", cookies = mapOf(
-            skToken to wpHttp
+        "$host?go=$skToken", cookies = mapOf(
+            skToken to "${formData["_wp_http2"]}"
         )
     ).document.selectFirst("meta[http-equiv=refresh]")?.attr("content")?.substringAfter("url=")
     val path = app.get(driveUrl ?: return null).text.substringAfter("replace(\"")
         .substringBefore("\")")
     if (path == "/404") return null
     return fixUrl(path, getBaseUrl(driveUrl))
-}
-
-suspend fun bypassTechmny(url: String): String? {
-    val techRes = app.get(url).document
-    val postUrl = url.substringBefore("?id=").substringAfter("/?")
-    val (goUrl, goHeader) = if (techRes.selectFirst("form#landing input[name=_wp_http_c]") != null) {
-        var res = app.post(
-            postUrl, data = mapOf(
-                "_wp_http_c" to url.substringAfter("?id=")
-            )
-        )
-        val (longC, catC, _) = getTechmnyCookies(res.text)
-        var headers = mapOf("Cookie" to "$longC; $catC")
-        var formLink = res.document.selectFirst("center a")?.attr("href")
-        res = app.get(formLink ?: return null, headers = headers)
-        val (longC2, _, postC) = getTechmnyCookies(res.text)
-        headers = mapOf("Cookie" to "$catC; $longC2; $postC")
-        formLink = res.document.selectFirst("center a")?.attr("href")
-
-        res = app.get(formLink ?: return null, headers = headers)
-        val goToken = res.text.substringAfter("?go=").substringBefore("\"")
-        val tokenUrl = "$postUrl?go=$goToken"
-        val newLongC = "$goToken=" + longC2.substringAfter("=")
-        headers = mapOf("Cookie" to "$catC; rdst_post=; $newLongC")
-        Pair(tokenUrl, headers)
-    } else {
-        val secondPage = techRes.getNextTechPage().document
-        val thirdPage = secondPage.getNextTechPage().text
-        val goToken = thirdPage.substringAfter("?go=").substringBefore("\"")
-        val tokenUrl = "$postUrl?go=$goToken"
-        val headers = mapOf(
-            "Cookie" to "$goToken=${
-                secondPage.select("form#landing input[name=_wp_http2]").attr("value")
-            }"
-        )
-        Pair(tokenUrl, headers)
-    }
-    val driveUrl =
-        app.get(goUrl, headers = goHeader).document.selectFirst("meta[http-equiv=refresh]")
-            ?.attr("content")?.substringAfter("url=")
-    val path = app.get(driveUrl ?: return null).text.substringAfter("replace(\"")
-        .substringBefore("\")")
-    if (path == "/404") return null
-    return fixUrl(path, getBaseUrl(driveUrl))
-}
-
-private suspend fun Document.getNextTechPage(): NiceResponse {
-    return app.post(
-        this.select("form").attr("action"),
-        data = this.select("form input").mapNotNull {
-            it.attr("name") to it.attr("value")
-        }.toMap().toMutableMap()
-    )
-}
-
-suspend fun bypassDriveleech(url: String): String? {
-    val path = app.get(url).text.substringAfter("replace(\"")
-        .substringBefore("\")")
-    if (path == "/404") return null
-    return fixUrl(path, getBaseUrl(url))
-}
-
-private fun getTechmnyCookies(page: String): Triple<String, String, String> {
-    val cat = "rdst_cat"
-    val post = "rdst_post"
-    val longC = page.substringAfter(".setTime")
-        .substringAfter("document.cookie = \"")
-        .substringBefore("\"")
-        .substringBefore(";")
-    val catC = if (page.contains("$cat=")) {
-        page.substringAfterLast("$cat=")
-            .substringBefore(";").let {
-                "$cat=$it"
-            }
-    } else {
-        ""
-    }
-
-    val postC = if (page.contains("$post=")) {
-        page.substringAfterLast("$post=")
-            .substringBefore(";").let {
-                "$post=$it"
-            }
-    } else {
-        ""
-    }
-
-    return Triple(longC, catC, postC)
 }
 
 suspend fun getTvMoviesServer(url: String, season: Int?, episode: Int?): Pair<String, String?>? {
@@ -915,11 +657,19 @@ suspend fun getTvMoviesServer(url: String, season: Int?, episode: Int?): Pair<St
     }
 }
 
-var filmxyCookies: Map<String,String>? = null
-suspend fun getFilmxyCookies(url: String) = filmxyCookies ?: fetchFilmxyCookies(url).also { filmxyCookies = it }
+suspend fun getSfServer() = sfServer ?: fetchSfServer().also { sfServer = it }
+
+suspend fun fetchSfServer(): String {
+    return app.get("https://raw.githubusercontent.com/hexated/cloudstream-resources/main/sfmovies_server").text
+}
+
+suspend fun getFilmxyCookies(url: String) =
+    filmxyCookies ?: fetchFilmxyCookies(url).also { filmxyCookies = it }
+
 suspend fun fetchFilmxyCookies(url: String): Map<String, String> {
 
-    val defaultCookies = mutableMapOf("G_ENABLED_IDPS" to "google", "true_checker" to "1", "XID" to "1")
+    val defaultCookies =
+        mutableMapOf("G_ENABLED_IDPS" to "google", "true_checker" to "1", "XID" to "1")
     session.get(
         url,
         headers = mapOf(
@@ -932,7 +682,10 @@ suspend fun fetchFilmxyCookies(url: String): Map<String, String> {
     defaultCookies["PHPSESSID"] = phpsessid
 
     val userNonce =
-        app.get("$filmxyAPI/login/?redirect_to=$filmxyAPI/", cookies = defaultCookies).document.select("script")
+        app.get(
+            "$filmxyAPI/login/?redirect_to=$filmxyAPI/",
+            cookies = defaultCookies
+        ).document.select("script")
             .find { it.data().contains("var userNonce") }?.data()?.let {
                 Regex("var\\suserNonce.*?\"(\\S+?)\";").find(it)?.groupValues?.get(1)
             }
@@ -961,36 +714,8 @@ fun Document.findTvMoviesIframe(): String? {
         ?.substringBefore("'>")
 }
 
-suspend fun searchWatchOnline(
-    title: String? = null,
-    season: Int? = null,
-    imdbId: String? = null,
-    tmdbId: Int? = null,
-): NiceResponse? {
-    val wTitle = title?.dropLast(1) // weird but this will make search working
-    val mediaId = app.get(
-        if (season == null) {
-            "${watchOnlineAPI}/api/v1/movies?filters[q]=$wTitle"
-        } else {
-            "${watchOnlineAPI}/api/v1/shows?filters[q]=$wTitle"
-        }
-    ).parsedSafe<WatchOnlineSearch>()?.items?.find {
-        it.imdb_id == imdbId || it.tmdb_id == tmdbId || it.imdb_id == imdbId?.removePrefix("tt")
-    }?.slug
-
-    return app.get(
-        fixUrl(
-            mediaId ?: return null, if (season == null) {
-                "${watchOnlineAPI}/movies/view"
-            } else {
-                "${watchOnlineAPI}/shows/view"
-            }
-        )
-    )
-}
-
 //modified code from https://github.com/jmir1/aniyomi-extensions/blob/master/src/all/kamyroll/src/eu/kanade/tachiyomi/animeextension/all/kamyroll/AccessTokenInterceptor.kt
-suspend fun getCrunchyrollToken(): Map<String, String> {
+suspend fun getCrunchyrollToken(): CrunchyrollAccessToken {
     val client = app.baseClient.newBuilder()
         .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("cr-unblocker.us.to", 1080)))
         .build()
@@ -1016,9 +741,18 @@ suspend fun getCrunchyrollToken(): Map<String, String> {
         )
     )
 
-    val response = tryParseJson<CrunchyrollToken>(client.newCall(request).execute().body.string())
-    return mapOf("Authorization" to "${response?.tokenType} ${response?.accessToken}")
-
+    val token = tryParseJson<CrunchyrollToken>(client.newCall(request).execute().body.string())
+    val headers = mapOf("Authorization" to "${token?.tokenType} ${token?.accessToken}")
+    val cms =
+        app.get("$crunchyrollAPI/index/v2", headers = headers).parsedSafe<CrunchyrollToken>()?.cms
+    return CrunchyrollAccessToken(
+        token?.accessToken,
+        token?.tokenType,
+        cms?.bucket,
+        cms?.policy,
+        cms?.signature,
+        cms?.key_pair_id,
+    )
 }
 
 suspend fun getCrunchyrollId(aniId: String?): String? {
@@ -1052,7 +786,7 @@ suspend fun getCrunchyrollId(aniId: String?): String? {
 
     return (externalLinks?.find { it.site == "VRV" }
         ?: externalLinks?.find { it.site == "Crunchyroll" })?.url?.let {
-        Regex("series/(\\w+)/?").find(it)?.groupValues?.get(1)
+        app.get(it).url.substringAfter("/series/").substringBefore("/")
     }
 }
 
@@ -1139,6 +873,43 @@ suspend fun tmdbToAnimeId(title: String?, year: Int?, season: String?, type: TvT
 
 }
 
+fun generateWpKey(r: String, m: String): String {
+    val rList = r.split("\\x").toTypedArray()
+    var n = ""
+    val decodedM = String(base64Decode(m.split("").reversed().joinToString("")).toCharArray())
+    for (s in decodedM.split("|")) {
+        n += "\\x" + rList[Integer.parseInt(s) + 1]
+    }
+    return n
+}
+
+suspend fun loadCustomTagExtractor(
+    tag: String? = null,
+    url: String,
+    referer: String? = null,
+    subtitleCallback: (SubtitleFile) -> Unit,
+    callback: (ExtractorLink) -> Unit,
+    quality: Int? = null,
+) {
+    loadExtractor(url, referer, subtitleCallback) { link ->
+        callback.invoke(
+            ExtractorLink(
+                link.source,
+                "${link.name} $tag",
+                link.url,
+                link.referer,
+                when (link.type) {
+                    ExtractorLinkType.M3U8 -> link.quality
+                    else -> quality ?: link.quality
+                },
+                link.type,
+                link.headers,
+                link.extractorData
+            )
+        )
+    }
+}
+
 suspend fun loadCustomExtractor(
     name: String? = null,
     url: String,
@@ -1155,6 +926,7 @@ suspend fun loadCustomExtractor(
                 link.url,
                 link.referer,
                 when {
+                    link.name == "VidSrc" -> Qualities.P1080.value
                     link.type == ExtractorLinkType.M3U8 -> link.quality
                     else -> quality ?: link.quality
                 },
@@ -1173,14 +945,6 @@ fun getSeason(month: Int?): String? {
     )
     if (month == null) return null
     return seasons[month - 1]
-}
-
-fun getPutlockerQuality(quality: String): Int {
-    return when {
-        quality.contains("NAME=\"1080p\"") || quality.contains("RESOLUTION=1920x1080") -> Qualities.P1080.value
-        quality.contains("NAME=\"720p\"") || quality.contains("RESOLUTION=1280x720") -> Qualities.P720.value
-        else -> Qualities.P480.value
-    }
 }
 
 fun getEpisodeSlug(
@@ -1269,7 +1033,7 @@ fun decodeIndexJson(json: String): String {
     return base64Decode(slug.substring(0, slug.length - 20))
 }
 
-fun String.decodePrimewireXor(key: String = BuildConfig.PRIMEWIRE_KEY): String {
+fun String.decodePrimewireXor(key: String): String {
     val sb = StringBuilder()
     var i = 0
     while (i < this.length) {
@@ -1283,15 +1047,15 @@ fun String.decodePrimewireXor(key: String = BuildConfig.PRIMEWIRE_KEY): String {
     return sb.toString()
 }
 
-fun Headers.getPrimewireCookies(cookieKey: String = "set-cookie"): Map<String, String> {
-    val cookieList =
-        this.filter { it.first.equals(cookieKey, ignoreCase = true) }.mapNotNull {
-            it.second.split(";").firstOrNull()
-        }
-    return cookieList.associate {
-        val split = it.split("=", limit = 2)
-        (split.getOrNull(0)?.trim() ?: "") to (split.getOrNull(1)?.trim() ?: "")
-    }.filter { it.key.isNotBlank() && it.value.isNotBlank() }
+fun vidsrctoDecrypt(text: String): String {
+    val parse = Base64.decode(text.toByteArray(), Base64.URL_SAFE)
+    val cipher = Cipher.getInstance("RC4")
+    cipher.init(
+        Cipher.DECRYPT_MODE,
+        SecretKeySpec("8z5Ag5wgagfsOuhz".toByteArray(), "RC4"),
+        cipher.parameters
+    )
+    return decode(cipher.doFinal(parse).toString(Charsets.UTF_8))
 }
 
 fun String?.createSlug(): String? {
@@ -1365,16 +1129,6 @@ fun getGMoviesQuality(str: String): Int {
     }
 }
 
-fun getSoraQuality(quality: String): Int {
-    return when (quality) {
-        "GROOT_FD" -> Qualities.P360.value
-        "GROOT_LD" -> Qualities.P480.value
-        "GROOT_SD" -> Qualities.P720.value
-        "GROOT_HD" -> Qualities.P1080.value
-        else -> Qualities.Unknown.value
-    }
-}
-
 fun getFDoviesQuality(str: String): String {
     return when {
         str.contains("1080P", true) -> "1080P"
@@ -1413,115 +1167,6 @@ fun getDeviceId(length: Int = 16): String {
         .joinToString("")
 }
 
-suspend fun comsumetEncodeVrf(query: String): String? {
-    return app.get("$consumetHelper?query=$query&action=fmovies-vrf", timeout = 30L)
-        .parsedSafe<Map<String, String>>()?.get("url")
-}
-
-suspend fun comsumetDecodeVrf(query: String): String? {
-    val res = app.get("$consumetHelper?query=$query&action=fmovies-decrypt", timeout = 30L)
-    return tryParseJson<Map<String, String>>(res.text)?.get("url")
-}
-
-fun encodeVrf(query: String): String {
-    return encode(
-        encryptVrf(
-            cipherVrf(bflixChipperKey, encode(query)),
-            bflixKey
-        )
-    )
-}
-
-fun decodeVrf(text: String): String {
-    return decode(cipherVrf(bflixChipperKey, decryptVrf(text, bflixKey)))
-}
-
-@Suppress("SameParameterValue")
-private fun encryptVrf(input: String, key: String): String {
-    if (input.any { it.code > 255 }) throw Exception("illegal characters!")
-    var output = ""
-    for (i in input.indices step 3) {
-        val a = intArrayOf(-1, -1, -1, -1)
-        a[0] = input[i].code shr 2
-        a[1] = (3 and input[i].code) shl 4
-        if (input.length > i + 1) {
-            a[1] = a[1] or (input[i + 1].code shr 4)
-            a[2] = (15 and input[i + 1].code) shl 2
-        }
-        if (input.length > i + 2) {
-            a[2] = a[2] or (input[i + 2].code shr 6)
-            a[3] = 63 and input[i + 2].code
-        }
-        for (n in a) {
-            if (n == -1) output += "="
-            else {
-                if (n in 0..63) output += key[n]
-            }
-        }
-    }
-    return output
-}
-
-@Suppress("SameParameterValue")
-private fun decryptVrf(input: String, key: String): String {
-    val t = if (input.replace("""[\t\n\f\r]""".toRegex(), "").length % 4 == 0) {
-        input.replace("""==?$""".toRegex(), "")
-    } else input
-    if (t.length % 4 == 1 || t.contains("""[^+/\dA-Za-z]""".toRegex())) throw Exception("bad input")
-    var i: Int
-    var r = ""
-    var e = 0
-    var u = 0
-    for (o in t.indices) {
-        e = e shl 6
-        i = key.indexOf(t[o])
-        e = e or i
-        u += 6
-        if (24 == u) {
-            r += ((16711680 and e) shr 16).toChar()
-            r += ((65280 and e) shr 8).toChar()
-            r += (255 and e).toChar()
-            e = 0
-            u = 0
-        }
-    }
-    return if (12 == u) {
-        e = e shr 4
-        r + e.toChar()
-    } else {
-        if (18 == u) {
-            e = e shr 2
-            r += ((65280 and e) shr 8).toChar()
-            r += (255 and e).toChar()
-        }
-        r
-    }
-}
-
-fun cipherVrf(key: String, text: String): String {
-    val arr = IntArray(256) { it }
-
-    var u = 0
-    var r: Int
-    arr.indices.forEach {
-        u = (u + arr[it] + key[it % key.length].code) % 256
-        r = arr[it]
-        arr[it] = arr[u]
-        arr[u] = r
-    }
-    u = 0
-    var c = 0
-
-    return text.indices.map { j ->
-        c = (c + 1) % 256
-        u = (u + arr[c]) % 256
-        r = arr[c]
-        arr[c] = arr[u]
-        arr[u] = r
-        (text[j].code xor arr[(arr[c] + arr[u]) % 256]).toChar()
-    }.joinToString("")
-}
-
 fun String.encodeUrl(): String {
     val url = URL(this)
     val uri = URI(url.protocol, url.userInfo, url.host, url.port, url.path, url.query, url.ref)
@@ -1534,16 +1179,37 @@ fun getBaseUrl(url: String): String {
     }
 }
 
+fun String.getHost(): String {
+    return fixTitle(URI(this).host.substringBeforeLast(".").substringAfterLast("."))
+}
+
 fun isUpcoming(dateString: String?): Boolean {
-    if (dateString == null) return false
-    val format = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-    val dateTime = format.parse(dateString)?.time ?: return false
-    return unixTimeMS < dateTime
+    return try {
+        val format = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        val dateTime = dateString?.let { format.parse(it)?.time } ?: return false
+        unixTimeMS < dateTime
+    } catch (t: Throwable) {
+        logError(t)
+        false
+    }
+}
+
+fun getDate(): TmdbDate {
+    val formatter = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    val calender = Calendar.getInstance()
+    val today = formatter.format(calender.time)
+    calender.add(Calendar.WEEK_OF_YEAR, 1)
+    val nextWeek = formatter.format(calender.time)
+    return TmdbDate(today, nextWeek)
 }
 
 fun decode(input: String): String = URLDecoder.decode(input, "utf-8")
 
 fun encode(input: String): String = URLEncoder.encode(input, "utf-8").replace("+", "%20")
+
+fun base64DecodeAPI(api: String): String {
+    return api.chunked(4).map { base64Decode(it) }.reversed().joinToString("")
+}
 
 fun decryptStreamUrl(data: String): String {
 
@@ -1613,10 +1279,29 @@ private enum class Symbol(val decimalValue: Int) {
 
     companion object {
         fun closestBelow(value: Int) =
-            values()
+            entries.toTypedArray()
                 .sortedByDescending { it.decimalValue }
                 .firstOrNull { value >= it.decimalValue }
     }
+}
+
+suspend fun request(
+    url: String,
+    allowRedirects: Boolean = true,
+    timeout: Long = 60L
+): Response {
+    val client = OkHttpClient().newBuilder()
+        .connectTimeout(timeout, TimeUnit.SECONDS)
+        .readTimeout(timeout, TimeUnit.SECONDS)
+        .writeTimeout(timeout, TimeUnit.SECONDS)
+        .followRedirects(allowRedirects)
+        .followSslRedirects(allowRedirects)
+        .build()
+
+    val request: Request = Request.Builder()
+        .url(url)
+        .build()
+    return client.newCall(request).await()
 }
 
 object DumpUtils {
@@ -1857,5 +1542,31 @@ object CryptoJS {
         return ByteArray(length).apply {
             SecureRandom().nextBytes(this)
         }
+    }
+}
+
+object AESGCM {
+    fun ByteArray.decrypt(pass: String): String {
+        val (key, iv) = generateKeyAndIv(pass)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+        return String(cipher.doFinal(this), StandardCharsets.UTF_8)
+    }
+
+    private fun generateKeyAndIv(pass: String): Pair<ByteArray, ByteArray> {
+        val datePart = getCurrentUTCDateString().take(16)
+        val hexString = datePart + pass
+        val byteArray = hexString.toByteArray(StandardCharsets.UTF_8)
+        val digest = MessageDigest.getInstance("SHA-256").digest(byteArray)
+        return digest.copyOfRange(0, digest.size / 2) to digest.copyOfRange(
+            digest.size / 2,
+            digest.size
+        )
+    }
+
+    private fun getCurrentUTCDateString(): String {
+        val dateFormat = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", Locale.getDefault())
+        dateFormat.timeZone = TimeZone.getTimeZone("GMT")
+        return dateFormat.format(Date())
     }
 }

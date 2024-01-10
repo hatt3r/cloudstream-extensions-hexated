@@ -1,13 +1,15 @@
 package com.hexated
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class Animasu : MainAPI() {
-    override var mainUrl = "https://animasu.cc"
+    override var mainUrl = "https://animasu.win"
     override var name = "Animasu"
     override val hasMainPage = true
     override var lang = "id"
@@ -77,7 +79,7 @@ class Animasu : MainAPI() {
     private fun Element.toSearchResult(): AnimeSearchResponse {
         val href = getProperAnimeLink(fixUrlNull(this.selectFirst("a")?.attr("href")).toString())
         val title = this.select("div.tt").text().trim()
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
+        val posterUrl = fixUrlNull(this.selectFirst("img")?.getImageAttr())
         val epNum = this.selectFirst("span.epx")?.text()?.filter { it.isDigit() }?.toIntOrNull()
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
@@ -96,10 +98,10 @@ class Animasu : MainAPI() {
         val document = app.get(url).document
 
         val title = document.selectFirst("div.infox h1")?.text().toString().replace("Sub Indo", "").trim()
-        val poster = document.selectFirst("div.bigcontent img")?.attr("src")?.replace("\n", "")
+        val poster = document.selectFirst("div.bigcontent img")?.getImageAttr()
 
         val table = document.selectFirst("div.infox div.spe")
-        val type = table?.selectFirst("span:contains(Jenis:)")?.ownText()
+        val type = getType(table?.selectFirst("span:contains(Jenis:)")?.ownText())
         val year = table?.selectFirst("span:contains(Rilis:)")?.ownText()?.substringAfterLast(",")?.trim()?.toIntOrNull()
         val status = table?.selectFirst("span:contains(Status:) font")?.text()
         val trailer = document.selectFirst("div.trailer iframe")?.attr("src")
@@ -107,17 +109,22 @@ class Animasu : MainAPI() {
             val link = fixUrl(it.selectFirst("a")!!.attr("href"))
             val name = it.selectFirst("a")?.text() ?: ""
             val episode = Regex("Episode\\s?(\\d+)").find(name)?.groupValues?.getOrNull(0)?.toIntOrNull()
-            Episode(link, name, episode = episode)
+            Episode(link, episode = episode)
         }.reversed()
 
-        return newAnimeLoadResponse(title, url, getType(type)) {
-            posterUrl = poster
+        val tracker = APIHolder.getTracker(listOf(title),TrackerType.getTypes(type),year,true)
+
+        return newAnimeLoadResponse(title, url, type) {
+            posterUrl = tracker?.image ?: poster
+            backgroundPosterUrl = tracker?.cover
             this.year = year
             addEpisodes(DubStatus.Subbed, episodes)
             showStatus = getStatus(status)
             plot = document.select("div.sinopsis p").text()
             this.tags = table?.select("span:contains(Genre:) a")?.map { it.text() }
             addTrailer(trailer)
+            addMalId(tracker?.malId)
+            addAniListId(tracker?.aniId?.toIntOrNull())
         }
     }
 
@@ -131,7 +138,7 @@ class Animasu : MainAPI() {
         document.select(".mobius > .mirror > option").mapNotNull {
             fixUrl(Jsoup.parse(base64Decode(it.attr("value"))).select("iframe").attr("src")) to it.text()
         }.apmap { (iframe, quality) ->
-            loadFixedExtractor(iframe, quality, "$mainUrl/", subtitleCallback, callback)
+            loadFixedExtractor(iframe.fixIframe(), quality, "$mainUrl/", subtitleCallback, callback)
         }
         return true
     }
@@ -150,7 +157,7 @@ class Animasu : MainAPI() {
                     link.name,
                     link.url,
                     link.referer,
-                    if(link.type != ExtractorLinkType.M3U8) getIndexQuality(quality) else link.quality,
+                    if(link.type == ExtractorLinkType.M3U8 || link.name == "Uservideo") link.quality else getIndexQuality(quality),
                     link.type,
                     link.headers,
                     link.extractorData
@@ -159,9 +166,26 @@ class Animasu : MainAPI() {
         }
     }
 
+    private fun String.fixIframe() : String {
+        return if(this.startsWith("https://dl.berkasdrive.com")) {
+            base64Decode(this.substringAfter("id="))
+        } else {
+            this
+        }
+    }
+
     private fun getIndexQuality(str: String?): Int {
         return Regex("(\\d{3,4})[pP]").find(str ?: "")?.groupValues?.getOrNull(1)?.toIntOrNull()
             ?: Qualities.Unknown.value
+    }
+
+    private fun Element.getImageAttr(): String? {
+        return when {
+            this.hasAttr("data-src") -> this.attr("abs:data-src")
+            this.hasAttr("data-lazy-src") -> this.attr("abs:data-lazy-src")
+            this.hasAttr("srcset") -> this.attr("abs:srcset").substringBefore(" ")
+            else -> this.attr("abs:src")
+        }
     }
 
 }

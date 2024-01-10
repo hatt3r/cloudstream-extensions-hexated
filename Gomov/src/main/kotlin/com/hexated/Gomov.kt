@@ -45,7 +45,7 @@ open class Gomov : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val title = this.selectFirst("h2.entry-title > a")?.text()?.trim() ?: return null
         val href = fixUrl(this.selectFirst("a")!!.attr("href"))
-        val posterUrl = fixUrlNull(this.selectFirst("a > img")?.attr("src"))?.fixImageQuality()
+        val posterUrl = fixUrlNull(this.selectFirst("a > img")?.getImageAttr()).fixImageQuality()
         val quality = this.select("div.gmr-qual, div.gmr-quality-item > a").text().trim().replace("-", "")
         return if (quality.isEmpty()) {
             val episode =
@@ -66,7 +66,7 @@ open class Gomov : MainAPI() {
     private fun Element.toRecommendResult(): SearchResponse? {
         val title = this.selectFirst("a > span.idmuvi-rp-title")?.text()?.trim() ?: return null
         val href = this.selectFirst("a")!!.attr("href")
-        val posterUrl = fixUrlNull(this.selectFirst("a > img")?.attr("src").fixImageQuality())
+        val posterUrl = fixUrlNull(this.selectFirst("a > img")?.getImageAttr().fixImageQuality())
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
         }
@@ -88,7 +88,7 @@ open class Gomov : MainAPI() {
             document.selectFirst("h1.entry-title")?.text()?.substringBefore("Season")?.substringBefore("Episode")?.trim()
                 .toString()
         val poster =
-            fixUrlNull(document.selectFirst("figure.pull-left > img")?.attr("src"))?.fixImageQuality()
+            fixUrlNull(document.selectFirst("figure.pull-left > img")?.getImageAttr())?.fixImageQuality()
         val tags = document.select("span.gmr-movie-genre:contains(Genre:) > a").map { it.text() }
 
         val year =
@@ -151,26 +151,48 @@ open class Gomov : MainAPI() {
     ): Boolean {
 
         val document = app.get(data).document
-        val id = document.selectFirst("div#muvipro_player_content_id")!!.attr("data-id")
+        val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
 
-        document.select("div.tab-content-ajax").apmap {
-            val server = app.post(
-                "$directUrl/wp-admin/admin-ajax.php",
-                data = mapOf("action" to "muvipro_player_content", "tab" to it.attr("id"), "post_id" to id)
-            ).document.select("iframe").attr("src")
+        if(id.isNullOrEmpty()) {
+            document.select("ul.muvipro-player-tabs li a").apmap { ele ->
+                val iframe = app.get(fixUrl(ele.attr("href"))).document.selectFirst("div.gmr-embed-responsive iframe")
+                    .getIframeAttr()?.let { httpsify(it) } ?: return@apmap
 
-            loadExtractor(httpsify(server), "$directUrl/", subtitleCallback, callback)
+                loadExtractor(iframe, "$directUrl/", subtitleCallback, callback)
+            }
+        } else {
+            document.select("div.tab-content-ajax").apmap { ele ->
+                val server = app.post(
+                    "$directUrl/wp-admin/admin-ajax.php",
+                    data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")
+                ).document.select("iframe").attr("src").let { httpsify(it) }
+
+                loadExtractor(server, "$directUrl/", subtitleCallback, callback)
+
+            }
         }
 
         return true
 
     }
 
+    private fun Element.getImageAttr(): String? {
+        return when {
+            this.hasAttr("data-src") -> this.attr("abs:data-src")
+            this.hasAttr("data-lazy-src") -> this.attr("abs:data-lazy-src")
+            this.hasAttr("srcset") -> this.attr("abs:srcset").substringBefore(" ")
+            else -> this.attr("abs:src")
+        }
+    }
+
+    private fun Element?.getIframeAttr() : String? {
+        return this?.attr("data-litespeed-src").takeIf { it?.isNotEmpty() == true } ?: this?.attr("src")
+    }
+
     private fun String?.fixImageQuality(): String? {
-        if(this == null) return null
-        val regex = Regex("(-\\d*x\\d*)").find(this)?.groupValues
-        if(regex?.isEmpty() == true) return this
-        return this.replace(regex?.get(0) ?: return null, "")
+        if (this == null) return null
+        val regex = Regex("(-\\d*x\\d*)").find(this)?.groupValues?.get(0) ?: return this
+        return this.replace(regex, "")
     }
 
     private fun getBaseUrl(url: String): String {

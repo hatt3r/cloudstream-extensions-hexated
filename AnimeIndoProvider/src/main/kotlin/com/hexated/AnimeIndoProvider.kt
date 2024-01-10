@@ -1,6 +1,8 @@
 package com.hexated
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.httpsify
@@ -13,7 +15,6 @@ class AnimeIndoProvider : MainAPI() {
     override var name = "AnimeIndo"
     override val hasMainPage = true
     override var lang = "id"
-
     override val supportedTypes = setOf(
         TvType.Anime,
         TvType.AnimeMovie,
@@ -48,8 +49,7 @@ class AnimeIndoProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val url = "$mainUrl/${request.data}/page/$page"
-        val document = app.get(url).document
+        val document = app.get("$mainUrl/${request.data}/page/$page").document
         val home = document.select("main#main div.animposx").mapNotNull {
             it.toSearchResult()
         }
@@ -90,8 +90,7 @@ class AnimeIndoProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val anime = mutableListOf<SearchResponse>()
         (1..2).forEach { page ->
-            val link = "$mainUrl/page/$page/?s=$query"
-            val document = app.get(link).document
+            val document = app.get("$mainUrl/page/$page/?s=$query").document
             val media = document.select(".site-main.relat > article").mapNotNull {
                 val title = it.selectFirst("div.title > h2")!!.ownText().trim()
                 val href = it.selectFirst("a")!!.attr("href")
@@ -108,13 +107,12 @@ class AnimeIndoProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
-
         val title = document.selectFirst("h1.entry-title")?.text()?.replace("Subtitle Indonesia", "")
             ?.trim() ?: return null
         val poster = document.selectFirst("div.thumb > img[itemprop=image]")?.attr("src")
         val tags = document.select("div.genxed > a").map { it.text() }
-        val type = document.selectFirst("div.info-content > div.spe > span:contains(Type:)")?.ownText()
-            ?.trim()?.lowercase() ?: "tv"
+        val type = getType(document.selectFirst("div.info-content > div.spe > span:contains(Type:)")?.ownText()
+            ?.trim()?.lowercase() ?: "tv")
         val year = document.selectFirst("div.info-content > div.spe > span:contains(Released:)")?.ownText()?.let {
             Regex("\\d,\\s(\\d*)").find(it)?.groupValues?.get(1)?.toIntOrNull()
         }
@@ -126,16 +124,19 @@ class AnimeIndoProvider : MainAPI() {
             val header = it.selectFirst("span.lchx > a") ?: return@mapNotNull null
             val episode = header.text().trim().replace("Episode", "").trim().toIntOrNull()
             val link = fixUrl(header.attr("href"))
-            Episode(link, header.text(), episode = episode)
+            Episode(link, episode = episode)
         }.reversed()
 
         val recommendations = document.select("div.relat div.animposx").mapNotNull {
             it.toSearchResult()
         }
 
-        return newAnimeLoadResponse(title, url, getType(type)) {
+        val tracker = APIHolder.getTracker(listOf(title),TrackerType.getTypes(type),year,true)
+
+        return newAnimeLoadResponse(title, url, type) {
             engName = title
-            posterUrl = poster
+            posterUrl = tracker?.image ?: poster
+            backgroundPosterUrl = tracker?.cover
             this.year = year
             addEpisodes(DubStatus.Subbed, episodes)
             showStatus = status
@@ -143,6 +144,8 @@ class AnimeIndoProvider : MainAPI() {
             this.tags = tags
             this.recommendations = recommendations
             addTrailer(trailer)
+            addMalId(tracker?.malId)
+            addAniListId(tracker?.aniId?.toIntOrNull())
         }
     }
 

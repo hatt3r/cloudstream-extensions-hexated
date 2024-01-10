@@ -1,17 +1,10 @@
 package com.hexated
 
-import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.apmap
-import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.mainPageOf
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
 
-class Ngefilm : DutaMovie() {
-    override var mainUrl = "https://ngefilm21.lat"
+class Ngefilm : Gomov() {
+    override var mainUrl = "https://tv3.ngefilm21.homes"
     override var name = "Ngefilm"
-
     override val mainPage = mainPageOf(
         "/page/%d/?s&search=advanced&post_type=movie&index&orderby&genre&movieyear&country&quality=" to "Movies Terbaru",
         "/page/%d/?s=&search=advanced&post_type=tv&index=&orderby=&genre=&movieyear=&country=&quality=" to "Series Terbaru",

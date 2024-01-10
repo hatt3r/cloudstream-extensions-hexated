@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 
 open class Mitedrive : ExtractorApi() {
@@ -20,10 +21,11 @@ open class Mitedrive : ExtractorApi() {
     ) {
         val id = url.substringAfterLast("/")
         val video = app.post(
-            "$mainUrl/api/generate",
+            "https://api.mitedrive.com/api/view/$id",
             referer = "$mainUrl/",
             data = mapOf(
-                "short_url" to id
+                "csrf_token" to "ZXlKcGNDSTZJak0yTGpneExqWTFMakUyTWlJc0ltUmxkbWxqWlNJNklrMXZlbWxzYkdFdk5TNHdJQ2hYYVc1a2IzZHpJRTVVSURFd0xqQTdJRmRwYmpZME95QjROalE3SUhKMk9qRXdNUzR3S1NCSFpXTnJieTh5TURFd01ERXdNU0JHYVhKbFptOTRMekV3TVM0d0lpd2lZbkp2ZDNObGNpSTZJazF2ZW1sc2JHRWlMQ0pqYjI5cmFXVWlPaUlpTENKeVpXWmxjbkpsY2lJNklpSjk=",
+                "slug" to id
             )
         ).parsedSafe<Responses>()?.data?.url
 
@@ -34,18 +36,14 @@ open class Mitedrive : ExtractorApi() {
                 video ?: return,
                 "$mainUrl/",
                 Qualities.Unknown.value,
-                headers = mapOf(
-                    "Accept" to "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5",
-                    "Sec-Fetch-Dest" to "video",
-                    "Sec-Fetch-Mode" to "no-cors",
-                )
+                INFER_TYPE,
             )
         )
 
     }
 
     data class Data(
-        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("original_url") val url: String? = null,
     )
 
     data class Responses(

@@ -14,6 +14,7 @@ class GomovPlugin: Plugin() {
         registerMainAPI(Ngefilm())
         registerMainAPI(Nodrakorid())
         registerMainAPI(Multiplex())
+        registerMainAPI(Pusatfilm())
         registerExtractorAPI(FilelionsTo())
         registerExtractorAPI(Likessb())
         registerExtractorAPI(DbGdriveplayer())
@@ -21,5 +22,8 @@ class GomovPlugin: Plugin() {
         registerExtractorAPI(Embedwish())
         registerExtractorAPI(Doods())
         registerExtractorAPI(Lylxan())
+        registerExtractorAPI(FilelionsOn())
+        registerExtractorAPI(Kotakajaib())
+        registerExtractorAPI(Uplayer())
     }
 }
