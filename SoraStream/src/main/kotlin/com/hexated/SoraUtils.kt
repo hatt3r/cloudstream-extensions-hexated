@@ -23,6 +23,7 @@ import com.lagradost.nicehttp.requestCreator
 import kotlinx.coroutines.delay
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -799,6 +800,10 @@ suspend fun getCrunchyrollIdFromMalSync(aniId: String?): String? {
         ?: regex.find("$crunchyroll")?.groupValues?.getOrNull(1)
 }
 
+suspend fun String.haveDub(referer: String) : Boolean {
+    return app.get(this,referer=referer).text.contains("TYPE=AUDIO")
+}
+
 suspend fun convertTmdbToAnimeId(
     title: String?,
     date: String?,
@@ -1285,23 +1290,53 @@ private enum class Symbol(val decimalValue: Int) {
     }
 }
 
-suspend fun request(
-    url: String,
-    allowRedirects: Boolean = true,
-    timeout: Long = 60L
-): Response {
-    val client = OkHttpClient().newBuilder()
-        .connectTimeout(timeout, TimeUnit.SECONDS)
-        .readTimeout(timeout, TimeUnit.SECONDS)
-        .writeTimeout(timeout, TimeUnit.SECONDS)
-        .followRedirects(allowRedirects)
-        .followSslRedirects(allowRedirects)
-        .build()
+// steal from https://github.com/aniyomiorg/aniyomi-extensions/blob/master/src/en/aniwave/src/eu/kanade/tachiyomi/animeextension/en/nineanime/AniwaveUtils.kt
+// credits to @samfundev
+object AniwaveUtils {
 
-    val request: Request = Request.Builder()
-        .url(url)
-        .build()
-    return client.newCall(request).await()
+    fun encodeVrf(input: String): String {
+        val rc4Key = SecretKeySpec("ysJhV6U27FVIjjuk".toByteArray(), "RC4")
+        val cipher = Cipher.getInstance("RC4")
+        cipher.init(Cipher.DECRYPT_MODE, rc4Key, cipher.parameters)
+        var vrf = cipher.doFinal(input.toByteArray())
+        vrf = Base64.encode(vrf, Base64.URL_SAFE or Base64.NO_WRAP)
+        vrf = Base64.encode(vrf, Base64.DEFAULT or Base64.NO_WRAP)
+        vrf = vrfShift(vrf)
+        vrf = Base64.encode(vrf, Base64.DEFAULT)
+        vrf = rot13(vrf)
+        val stringVrf = vrf.toString(Charsets.UTF_8)
+        return encode(stringVrf)
+    }
+
+    fun decodeVrf(input: String): String {
+        var vrf = input.toByteArray()
+        vrf = Base64.decode(vrf, Base64.URL_SAFE)
+        val rc4Key = SecretKeySpec("hlPeNwkncH0fq9so".toByteArray(), "RC4")
+        val cipher = Cipher.getInstance("RC4")
+        cipher.init(Cipher.DECRYPT_MODE, rc4Key, cipher.parameters)
+        vrf = cipher.doFinal(vrf)
+        return decode(vrf.toString(Charsets.UTF_8))
+    }
+
+    private fun rot13(vrf: ByteArray): ByteArray {
+        for (i in vrf.indices) {
+            val byte = vrf[i]
+            if (byte in 'A'.code..'Z'.code) {
+                vrf[i] = ((byte - 'A'.code + 13) % 26 + 'A'.code).toByte()
+            } else if (byte in 'a'.code..'z'.code) {
+                vrf[i] = ((byte - 'a'.code + 13) % 26 + 'a'.code).toByte()
+            }
+        }
+        return vrf
+    }
+
+    private fun vrfShift(vrf: ByteArray): ByteArray {
+        for (i in vrf.indices) {
+            val shift = arrayOf(-3, 3, -4, 2, -2, 5, 4, 5)[i % 8]
+            vrf[i] = vrf[i].plus(shift).toByte()
+        }
+        return vrf
+    }
 }
 
 object DumpUtils {
